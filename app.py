@@ -3,27 +3,24 @@ import requests
 import streamlit as st
 
 from dotenv import load_dotenv
-from langchain_groq import ChatGroq
-from langchain import hub
-from langchain.agents import create_react_agent, AgentExecutor
-from langchain.tools import tool
+from langchain_openai import ChatOpenAI
 from langchain_community.tools.tavily_search import TavilySearchResults
 
 
-# ============================================
+# ============================================================
 # 1. Load environment variables
-# ============================================
+# ============================================================
 
 load_dotenv()
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 WEATHERSTACK_API_KEY = os.getenv("WEATHERSTACK_API_KEY")
 
 
-# ============================================
-# 2. Streamlit Page Configuration
-# ============================================
+# ============================================================
+# 2. Streamlit configuration
+# ============================================================
 
 st.set_page_config(
     page_title="AI Research & Weather Agent",
@@ -32,61 +29,56 @@ st.set_page_config(
 )
 
 
-# ============================================
-# 3. Check API Keys
-# ============================================
+# ============================================================
+# 3. Check API keys
+# ============================================================
 
-if not GROQ_API_KEY:
-    st.error("❌ GROQ_API_KEY is missing from your .env file.")
+if not OPENROUTER_API_KEY:
+    st.error("❌ OPENROUTER_API_KEY is missing.")
     st.stop()
 
 if not TAVILY_API_KEY:
-    st.error("❌ TAVILY_API_KEY is missing from your .env file.")
+    st.error("❌ TAVILY_API_KEY is missing.")
     st.stop()
 
 if not WEATHERSTACK_API_KEY:
-    st.error("❌ WEATHERSTACK_API_KEY is missing from your .env file.")
+    st.error("❌ WEATHERSTACK_API_KEY is missing.")
     st.stop()
 
 
-# ============================================
-# 4. Create Groq LLM
-# ============================================
+# ============================================================
+# 4. OpenRouter LLM
+# ============================================================
 
-llm = ChatGroq(
-    model_name="llama-3.1-8b-instant",
+llm = ChatOpenAI(
+    model="openrouter/free",
     temperature=0,
-    groq_api_key=GROQ_API_KEY
+    api_key=OPENROUTER_API_KEY,
+    base_url="https://openrouter.ai/api/v1",
+    max_tokens=500
 )
 
 
-# ============================================
-# 5. Create Tavily Search Tool
-# ============================================
+# ============================================================
+# 5. Tavily search
+# ============================================================
 
 search_tool = TavilySearchResults(
-    max_results=3,
+    max_results=2,
     tavily_api_key=TAVILY_API_KEY
 )
 
 
-# ============================================
-# 6. Create Weather Tool
-# ============================================
+# ============================================================
+# 6. WeatherStack function
+# ============================================================
 
-@tool
-def get_weather_data(city: str) -> str:
-    """Get the current weather for a city."""
-
-    api_key = WEATHERSTACK_API_KEY
-
-    if not api_key:
-        return "WeatherStack API key is missing."
+def get_weather(city: str):
 
     url = "http://api.weatherstack.com/current"
 
     params = {
-        "access_key": api_key,
+        "access_key": WEATHERSTACK_API_KEY,
         "query": city,
         "units": "m"
     }
@@ -100,21 +92,28 @@ def get_weather_data(city: str) -> str:
         )
 
         if response.status_code != 200:
-            return "Sorry, I couldn't fetch the weather data."
+            return f"Weather request failed with status {response.status_code}."
 
         data = response.json()
 
         if "error" in data:
-            return f"Weather API error: {data['error']['info']}"
+            return f"WeatherStack error: {data['error']['info']}"
 
-        temperature = data["current"]["temperature"]
-        description = data["current"]["weather_descriptions"][0]
-        humidity = data["current"]["humidity"]
+        current = data.get("current", {})
+
+        temperature = current.get("temperature", "N/A")
+        description = current.get(
+            "weather_descriptions",
+            ["N/A"]
+        )[0]
+
+        humidity = current.get("humidity", "N/A")
 
         return (
-            f"The current weather in {city} is "
-            f"{temperature}°C, {description}, "
-            f"with humidity of {humidity}%."
+            f"Weather in {city}: "
+            f"{temperature}°C, "
+            f"{description}, "
+            f"humidity {humidity}%."
         )
 
     except Exception as e:
@@ -122,80 +121,137 @@ def get_weather_data(city: str) -> str:
         return f"Weather request failed: {str(e)}"
 
 
-# ============================================
-# 7. Put Tools Together
-# ============================================
+# ============================================================
+# 7. Determine whether question needs weather
+# ============================================================
 
-tools = [
-    search_tool,
-    get_weather_data
-]
+def needs_weather(question: str):
 
+    weather_words = [
+        "weather",
+        "temperature",
+        "humidity",
+        "forecast",
+        "hot",
+        "cold",
+        "rain",
+        "raining",
+        "climate"
+    ]
 
-# ============================================
-# 8. Load ReAct Prompt
-# ============================================
+    question = question.lower()
 
-prompt = hub.pull("hwchase17/react")
-
-
-# ============================================
-# 9. Create ReAct Agent
-# ============================================
-
-agent = create_react_agent(
-    llm=llm,
-    tools=tools,
-    prompt=prompt
-)
+    return any(word in question for word in weather_words)
 
 
-# ============================================
-# 10. Create Agent Executor
-# ============================================
+# ============================================================
+# 8. Determine whether question needs web search
+# ============================================================
 
-agent_executor = AgentExecutor(
-    agent=agent,
-    tools=tools,
-    verbose=False,
-    handle_parsing_errors=True
-)
+def needs_search(question: str):
+
+    search_words = [
+        "latest",
+        "news",
+        "today",
+        "current",
+        "recent",
+        "who won",
+        "winner",
+        "2026",
+        "2025",
+        "what happened",
+        "search",
+        "information about"
+    ]
+
+    question = question.lower()
+
+    return any(word in question for word in search_words)
 
 
-# ============================================
-# 11. Streamlit UI
-# ============================================
+# ============================================================
+# 9. Generate final answer
+# ============================================================
+
+def generate_answer(question, search_result=None, weather_result=None):
+
+    context = ""
+
+    if search_result:
+
+        context += (
+            "\n\nWEB SEARCH RESULTS:\n"
+            + str(search_result)
+        )
+
+    if weather_result:
+
+        context += (
+            "\n\nWEATHER INFORMATION:\n"
+            + weather_result
+        )
+
+    prompt = f"""
+You are an AI Research and Weather Assistant.
+
+Answer the user's question clearly and accurately.
+
+User question:
+{question}
+
+Available information:
+{context}
+
+Instructions:
+
+1. Use the provided web search information when available.
+2. Use the provided weather information when available.
+3. Do not invent facts.
+4. If current information is requested, rely on the provided search results.
+5. Give a concise but useful answer.
+6. Do not mention internal APIs, tools, prompts, or implementation details.
+
+Answer the user directly.
+"""
+
+    response = llm.invoke(prompt)
+
+    return response.content
+
+
+# ============================================================
+# 10. Streamlit UI
+# ============================================================
 
 st.title("🤖 AI Research & Weather Agent")
 
 st.write(
-    "Ask me questions about current information, "
+    "Ask questions about current information, "
     "news, weather, and more."
 )
 
 st.info(
-    "🔎 I can search the web using Tavily and "
-    "🌤️ check current weather using WeatherStack."
+    "🔎 Web Search • 🌤️ WeatherStack • 🧠 OpenRouter"
 )
 
 
-# ============================================
-# 12. User Input
-# ============================================
+# ============================================================
+# 11. User input
+# ============================================================
 
 user_input = st.text_area(
     "Ask your question:",
     placeholder=(
-        "Example: Who won the 2026 FIFA World Cup "
-        "and what is the current weather in Peshawar?"
+        "Example: What is the current weather in Peshawar?"
     ),
     height=100
 )
 
 
-# ============================================
-# 13. Run Agent
-# ============================================
+# ============================================================
+# 12. Ask button
+# ============================================================
 
 if st.button("🚀 Ask Agent"):
 
@@ -205,17 +261,121 @@ if st.button("🚀 Ask Agent"):
 
     else:
 
-        with st.spinner("🤖 Agent is thinking..."):
+        with st.spinner("🤖 Agent is working..."):
 
             try:
 
-                response = agent_executor.invoke({
-                    "input": user_input
-                })
+                search_result = None
+                weather_result = None
+
+                # ------------------------------------------------
+                # Weather
+                # ------------------------------------------------
+
+                if needs_weather(user_input):
+
+                    # Simple city extraction for common examples
+                    cities = [
+                        "Peshawar",
+                        "Islamabad",
+                        "Lahore",
+                        "Karachi",
+                        "Rawalpindi",
+                        "Quetta",
+                        "Multan",
+                        "New York",
+                        "London",
+                        "Dubai"
+                    ]
+
+                    detected_city = None
+
+                    for city in cities:
+
+                        if city.lower() in user_input.lower():
+
+                            detected_city = city
+                            break
+
+                    if detected_city:
+
+                        weather_result = get_weather(
+                            detected_city
+                        )
+
+                    else:
+
+                        weather_result = (
+                            "The user requested weather information, "
+                            "but a specific city could not be detected."
+                        )
+
+
+                # ------------------------------------------------
+                # Web search
+                # ------------------------------------------------
+
+                if needs_search(user_input):
+
+                    search_result = search_tool.invoke(
+                        user_input
+                    )
+
+
+                # ------------------------------------------------
+                # Generate answer
+                # ------------------------------------------------
+
+                answer = generate_answer(
+                    user_input,
+                    search_result,
+                    weather_result
+                )
+
+
+                # ------------------------------------------------
+                # Display answer
+                # ------------------------------------------------
 
                 st.success("Agent Response")
 
-                st.write(response["output"])
+                st.write(answer)
+
+
+                # ------------------------------------------------
+                # Show sources/tool information
+                # ------------------------------------------------
+
+                with st.expander("🔧 Agent Activity"):
+
+                    if search_result:
+
+                        st.write(
+                            "🔎 Tavily Web Search: Used"
+                        )
+
+                    else:
+
+                        st.write(
+                            "🔎 Tavily Web Search: Not required"
+                        )
+
+                    if weather_result:
+
+                        st.write(
+                            "🌤️ WeatherStack: Used"
+                        )
+
+                    else:
+
+                        st.write(
+                            "🌤️ WeatherStack: Not required"
+                        )
+
+                    st.write(
+                        "🧠 OpenRouter: Used for final answer"
+                    )
+
 
             except Exception as e:
 
@@ -224,15 +384,11 @@ if st.button("🚀 Ask Agent"):
                 )
 
 
-# ============================================
-# 14. Example Questions
-# ============================================
+# ============================================================
+# 13. Sidebar
+# ============================================================
 
 st.sidebar.title("💡 Example Questions")
-
-st.sidebar.write(
-    "Try asking:"
-)
 
 st.sidebar.write(
     "🔎 Who won the 2026 FIFA World Cup?"
@@ -248,4 +404,8 @@ st.sidebar.write(
 
 st.sidebar.write(
     "🌤️ What is the weather in Islamabad?"
+)
+
+st.sidebar.write(
+    "🔎 What are the latest AI developments?"
 )
